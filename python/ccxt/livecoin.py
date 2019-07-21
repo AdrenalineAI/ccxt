@@ -146,16 +146,16 @@ class livecoin (Exchange):
         })
 
     def fetch_markets(self, params={}):
-        markets = self.publicGetExchangeTicker()
+        response = self.publicGetExchangeTicker(params)
         restrictions = self.publicGetExchangeRestrictions()
         restrictionsById = self.index_by(restrictions['restrictions'], 'currencyPair')
         result = []
-        for p in range(0, len(markets)):
-            market = markets[p]
-            id = market['symbol']
+        for i in range(0, len(response)):
+            market = response[i]
+            id = self.safe_string(market, 'symbol')
             baseId, quoteId = id.split('/')
-            base = self.common_currency_code(baseId)
-            quote = self.common_currency_code(quoteId)
+            base = self.safe_currency_code(baseId)
+            quote = self.safe_currency_code(quoteId)
             symbol = base + '/' + quote
             coinRestrictions = self.safe_value(restrictionsById, symbol)
             precision = {
@@ -192,28 +192,31 @@ class livecoin (Exchange):
 
     def fetch_currencies(self, params={}):
         response = self.publicGetInfoCoinInfo(params)
-        currencies = response['info']
+        currencies = self.safe_value(response, 'info')
         result = {}
         for i in range(0, len(currencies)):
             currency = currencies[i]
-            id = currency['symbol']
+            id = self.safe_string(currency, 'symbol')
             # todo: will need to rethink the fees
             # to add support for multiple withdrawal/deposit methods and
             # differentiated fees for each particular method
-            code = self.common_currency_code(id)
+            code = self.safe_currency_code(id)
             precision = 8  # default precision, todo: fix "magic constants"
-            active = (currency['walletStatus'] == 'normal')
+            walletStatus = self.safe_string(currency, 'walletStatus')
+            active = (walletStatus == 'normal')
+            name = self.safe_string(currency, 'name')
+            fee = self.safe_float(currency, 'withdrawFee')
             result[code] = {
                 'id': id,
                 'code': code,
                 'info': currency,
-                'name': currency['name'],
+                'name': name,
                 'active': active,
-                'fee': currency['withdrawFee'],  # todo: redesign
+                'fee': fee,
                 'precision': precision,
                 'limits': {
                     'amount': {
-                        'min': currency['minOrderAmount'],
+                        'min': self.safe_float(currency, 'minOrderAmount'),
                         'max': math.pow(10, precision),
                     },
                     'price': {
@@ -221,15 +224,15 @@ class livecoin (Exchange):
                         'max': math.pow(10, precision),
                     },
                     'cost': {
-                        'min': currency['minOrderAmount'],
+                        'min': self.safe_float(currency, 'minOrderAmount'),
                         'max': None,
                     },
                     'withdraw': {
-                        'min': currency['minWithdrawAmount'],
+                        'min': self.safe_float(currency, 'minWithdrawAmount'),
                         'max': math.pow(10, precision),
                     },
                     'deposit': {
-                        'min': currency['minDepositAmount'],
+                        'min': self.safe_float(currency, 'minDepositAmount'),
                         'max': None,
                     },
                 },
@@ -262,7 +265,7 @@ class livecoin (Exchange):
         ]
         currencies.append({
             'id': 'RUR',
-            'code': self.common_currency_code('RUR'),
+            'code': self.safe_currency_code('RUR'),
             'name': 'Russian ruble',
         })
         for i in range(0, len(currencies)):
@@ -273,23 +276,24 @@ class livecoin (Exchange):
 
     def fetch_balance(self, params={}):
         self.load_markets()
-        balances = self.privateGetPaymentBalances()
-        result = {'info': balances}
-        for b in range(0, len(balances)):
-            balance = balances[b]
-            currency = balance['currency']
+        response = self.privateGetPaymentBalances(params)
+        result = {'info': response}
+        for i in range(0, len(response)):
+            balance = response[i]
+            currencyId = self.safe_string(balance, 'currency')
+            code = self.safe_currency_code(currencyId)
             account = None
-            if currency in result:
-                account = result[currency]
+            if code in result:
+                account = result[code]
             else:
                 account = self.account()
             if balance['type'] == 'total':
-                account['total'] = float(balance['value'])
+                account['total'] = self.safe_float(balance, 'value')
             if balance['type'] == 'available':
-                account['free'] = float(balance['value'])
+                account['free'] = self.safe_float(balance, 'value')
             if balance['type'] == 'trade':
-                account['used'] = float(balance['value'])
-            result[currency] = account
+                account['used'] = self.safe_float(balance, 'value')
+            result[code] = account
         return self.parse_balance(result)
 
     def fetch_trading_fees(self, params={}):
@@ -310,9 +314,9 @@ class livecoin (Exchange):
         }
         if limit is not None:
             request['depth'] = limit  # 100
-        orderbook = self.publicGetExchangeOrderBook(self.extend(request, params))
-        timestamp = orderbook['timestamp']
-        return self.parse_order_book(orderbook, timestamp)
+        response = self.publicGetExchangeOrderBook(self.extend(request, params))
+        timestamp = self.safe_integer(response, 'timestamp')
+        return self.parse_order_book(response, timestamp)
 
     def parse_ticker(self, ticker, market=None):
         timestamp = self.milliseconds()
@@ -365,12 +369,13 @@ class livecoin (Exchange):
     def fetch_ticker(self, symbol, params={}):
         self.load_markets()
         market = self.market(symbol)
-        ticker = self.publicGetExchangeTicker(self.extend({
+        request = {
             'currencyPair': market['id'],
-        }, params))
+        }
+        ticker = self.publicGetExchangeTicker(self.extend(request, params))
         return self.parse_ticker(ticker, market)
 
-    def parse_trade(self, trade, market):
+    def parse_trade(self, trade, market=None):
         #
         # fetchTrades(public)
         #
@@ -394,7 +399,7 @@ class livecoin (Exchange):
         #         "commission": 0,
         #         "clientorderid": 1472837650
         #     }
-        timestamp = self.safe_string_2(trade, 'time', 'datetime')
+        timestamp = self.safe_integer_2(trade, 'time', 'datetime')
         if timestamp is not None:
             timestamp = timestamp * 1000
         fee = None
@@ -416,15 +421,19 @@ class livecoin (Exchange):
         if amount is not None:
             if price is not None:
                 cost = amount * price
+        symbol = None
+        if market is not None:
+            symbol = market['symbol']
         return {
+            'id': id,
             'info': trade,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
-            'symbol': market['symbol'],
-            'id': id,
+            'symbol': symbol,
             'order': orderId,
             'type': None,
             'side': side,
+            'takerOrMaker': None,
             'price': price,
             'amount': amount,
             'cost': cost,
@@ -641,11 +650,11 @@ class livecoin (Exchange):
             raise ArgumentsRequired(self.id + ' cancelOrder requires a symbol argument')
         self.load_markets()
         market = self.market(symbol)
-        currencyPair = market['id']
-        response = self.privatePostExchangeCancellimit(self.extend({
+        request = {
             'orderId': id,
-            'currencyPair': currencyPair,
-        }, params))
+            'currencyPair': market['id'],
+        }
+        response = self.privatePostExchangeCancellimit(self.extend(request, params))
         message = self.safe_string(response, 'message', self.json(response))
         if 'success' in response:
             if not response['success']:
@@ -699,7 +708,6 @@ class livecoin (Exchange):
         #        "externalKey": "....87diPBy......3hTtuwUT78Yi",(address on deposits, tx on withdrawals)
         #        "documentId": 1110662453
         #    },
-        code = None
         txid = None
         address = None
         id = self.safe_string(transaction, 'documentId')
@@ -708,11 +716,7 @@ class livecoin (Exchange):
         type = self.safe_string(transaction, 'type').lower()
         currencyId = self.safe_string(transaction, 'fixedCurrency')
         feeCost = self.safe_float(transaction, 'fee')
-        currency = self.safe_value(self.currencies_by_id, currencyId)
-        if currency is not None:
-            code = currency['code']
-        else:
-            code = self.common_currency_code(currencyId)
+        code = self.safe_currency_code(currencyId, currency)
         if type == 'withdrawal':
             txid = self.safe_string(transaction, 'externalKey')
             address = self.safe_string(transaction, 'id')

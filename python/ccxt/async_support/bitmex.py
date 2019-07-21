@@ -176,8 +176,8 @@ class bitmex (Exchange):
             baseId = market['underlying']
             quoteId = market['quoteCurrency']
             basequote = baseId + quoteId
-            base = self.common_currency_code(baseId)
-            quote = self.common_currency_code(quoteId)
+            base = self.safe_currency_code(baseId)
+            quote = self.safe_currency_code(quoteId)
             swap = (id == basequote)
             # 'positionCurrency' may be empty("", as Bitmex currently returns for ETHUSD)
             # so let's take the quote currency first and then adjust if needed
@@ -185,7 +185,7 @@ class bitmex (Exchange):
             type = None
             future = False
             prediction = False
-            position = self.common_currency_code(positionId)
+            position = self.safe_currency_code(positionId)
             symbol = id
             if swap:
                 type = 'swap'
@@ -235,8 +235,8 @@ class bitmex (Exchange):
                 'active': active,
                 'precision': precision,
                 'limits': limits,
-                'taker': market['takerFee'],
-                'maker': market['makerFee'],
+                'taker': self.safe_float(market, 'takerFee'),
+                'maker': self.safe_float(market, 'makerFee'),
                 'type': type,
                 'spot': False,
                 'swap': swap,
@@ -248,23 +248,21 @@ class bitmex (Exchange):
 
     async def fetch_balance(self, params={}):
         await self.load_markets()
-        request = {'currency': 'all'}
+        request = {
+            'currency': 'all',
+        }
         response = await self.privateGetUserMargin(self.extend(request, params))
         result = {'info': response}
-        for b in range(0, len(response)):
-            balance = response[b]
+        for i in range(0, len(response)):
+            balance = response[i]
             currencyId = self.safe_string(balance, 'currency')
-            currencyId = currencyId.upper()
-            code = self.common_currency_code(currencyId)
-            account = {
-                'free': balance['availableMargin'],
-                'used': 0.0,
-                'total': balance['marginBalance'],
-            }
+            code = self.safe_currency_code(currencyId)
+            account = self.account()
+            account['free'] = self.safe_float(balance, 'availableMargin')
+            account['total'] = self.safe_float(balance, 'marginBalance')
             if code == 'BTC':
                 account['free'] = account['free'] * 0.00000001
                 account['total'] = account['total'] * 0.00000001
-            account['used'] = account['total'] - account['free']
             result[code] = account
         return self.parse_balance(result)
 
@@ -276,7 +274,7 @@ class bitmex (Exchange):
         }
         if limit is not None:
             request['depth'] = limit
-        orderbook = await self.publicGetOrderBookL2(self.extend(request, params))
+        response = await self.publicGetOrderBookL2(self.extend(request, params))
         result = {
             'bids': [],
             'asks': [],
@@ -284,8 +282,8 @@ class bitmex (Exchange):
             'datetime': None,
             'nonce': None,
         }
-        for o in range(0, len(orderbook)):
-            order = orderbook[o]
+        for i in range(0, len(response)):
+            order = response[i]
             side = 'asks' if (order['side'] == 'Sell') else 'bids'
             amount = self.safe_float(order, 'size')
             price = self.safe_float(order, 'price')
@@ -299,11 +297,15 @@ class bitmex (Exchange):
         return result
 
     async def fetch_order(self, id, symbol=None, params={}):
-        filter = {'filter': {'orderID': id}}
-        result = await self.fetch_orders(symbol, None, None, self.deep_extend(filter, params))
-        numResults = len(result)
+        filter = {
+            'filter': {
+                'orderID': id,
+            },
+        }
+        response = await self.fetch_orders(symbol, None, None, self.deep_extend(filter, params))
+        numResults = len(response)
         if numResults == 1:
-            return result[0]
+            return response[0]
         raise OrderNotFound(self.id + ': The order ' + id + ' not found.')
 
     async def fetch_orders(self, symbol=None, since=None, limit=None, params={}):
@@ -327,8 +329,12 @@ class bitmex (Exchange):
         return self.parse_orders(response, market, since, limit)
 
     async def fetch_open_orders(self, symbol=None, since=None, limit=None, params={}):
-        filter_params = {'filter': {'open': True}}
-        return await self.fetch_orders(symbol, since, limit, self.deep_extend(filter_params, params))
+        request = {
+            'filter': {
+                'open': True,
+            },
+        }
+        return await self.fetch_orders(symbol, since, limit, self.deep_extend(request, params))
 
     async def fetch_closed_orders(self, symbol=None, since=None, limit=None, params={}):
         # Bitmex barfs if you set 'open': False in the filter...
@@ -443,10 +449,7 @@ class bitmex (Exchange):
         referenceAccount = None
         type = self.parse_ledger_entry_type(self.safe_string(item, 'transactType'))
         currencyId = self.safe_string(item, 'currency')
-        code = None
-        if currencyId is not None:
-            currencyId = currencyId.upper()
-            code = self.common_currency_code(currencyId)
+        code = self.safe_currency_code(currencyId, currency)
         amount = self.safe_float(item, 'amount')
         if amount is not None:
             amount = amount * 1e-8
@@ -468,10 +471,12 @@ class bitmex (Exchange):
             amount = abs(amount)
         else:
             direction = 'in'
-        status = self.parse_transaction_status(item, 'transactStatus')
+        status = self.parse_transaction_status(self.safe_string(item, 'transactStatus'))
         return {
-            'info': item,
             'id': id,
+            'info': item,
+            'timestamp': timestamp,
+            'datetime': self.iso8601(timestamp),
             'direction': direction,
             'account': account,
             'referenceId': referenceId,
@@ -482,8 +487,6 @@ class bitmex (Exchange):
             'before': before,
             'after': after,
             'status': status,
-            'timestamp': timestamp,
-            'datetime': self.iso8601(timestamp),
             'fee': fee,
         }
 
@@ -789,7 +792,7 @@ class bitmex (Exchange):
         }
 
     def parse_ohlcv(self, ohlcv, market=None, timeframe='1m', since=None, limit=None):
-        timestamp = self.parse8601(ohlcv['timestamp'])
+        timestamp = self.parse8601(self.safe_string(ohlcv, 'timestamp'))
         return [
             timestamp,
             self.safe_float(ohlcv, 'open'),
@@ -911,8 +914,7 @@ class bitmex (Exchange):
             feeCost = self.safe_float(trade, 'execComm')
             feeCost = feeCost / 100000000
             currencyId = self.safe_string(trade, 'settlCurrency')
-            currencyId = currencyId.upper()
-            feeCurrency = self.common_currency_code(currencyId)
+            feeCurrency = self.safe_currency_code(currencyId)
             feeRate = self.safe_float(trade, 'commission')
             fee = {
                 'cost': feeCost,
@@ -972,9 +974,9 @@ class bitmex (Exchange):
         if market is not None:
             symbol = market['symbol']
         else:
-            id = order['symbol']
-            if id in self.markets_by_id:
-                market = self.markets_by_id[id]
+            marketId = self.safe_string(order, 'symbol')
+            if marketId in self.markets_by_id:
+                market = self.markets_by_id[marketId]
                 symbol = market['symbol']
         timestamp = self.parse8601(self.safe_string(order, 'timestamp'))
         lastTradeTimestamp = self.parse8601(self.safe_string(order, 'transactTime'))
@@ -992,15 +994,22 @@ class bitmex (Exchange):
                 cost = average * filled
             elif price is not None:
                 cost = price * filled
-        result = {
+        id = self.safe_string(order, 'orderID')
+        type = self.safe_string(order, 'ordType')
+        if type is not None:
+            type = type.lower()
+        side = self.safe_string(order, 'side')
+        if side is not None:
+            side = side.lower()
+        return {
             'info': order,
-            'id': str(order['orderID']),
+            'id': id,
             'timestamp': timestamp,
             'datetime': self.iso8601(timestamp),
             'lastTradeTimestamp': lastTradeTimestamp,
             'symbol': symbol,
-            'type': order['ordType'].lower(),
-            'side': order['side'].lower(),
+            'type': type,
+            'side': side,
             'price': price,
             'amount': amount,
             'cost': cost,
@@ -1010,7 +1019,6 @@ class bitmex (Exchange):
             'status': status,
             'fee': None,
         }
-        return result
 
     async def fetch_trades(self, symbol, since=None, limit=None, params={}):
         await self.load_markets()
@@ -1122,24 +1130,24 @@ class bitmex (Exchange):
         }
 
     def handle_errors(self, code, reason, url, method, headers, body, response):
+        if response is None:
+            return
         if code == 429:
             raise DDoSProtection(self.id + ' ' + body)
         if code >= 400:
-            if body:
-                if body[0] == '{':
-                    error = self.safe_value(response, 'error', {})
-                    message = self.safe_string(error, 'message')
-                    feedback = self.id + ' ' + body
-                    exact = self.exceptions['exact']
-                    if message in exact:
-                        raise exact[message](feedback)
-                    broad = self.exceptions['broad']
-                    broadKey = self.findBroadlyMatchedKey(broad, message)
-                    if broadKey is not None:
-                        raise broad[broadKey](feedback)
-                    if code == 400:
-                        raise BadRequest(feedback)
-                    raise ExchangeError(feedback)  # unknown message
+            error = self.safe_value(response, 'error', {})
+            message = self.safe_string(error, 'message')
+            feedback = self.id + ' ' + body
+            exact = self.exceptions['exact']
+            if message in exact:
+                raise exact[message](feedback)
+            broad = self.exceptions['broad']
+            broadKey = self.findBroadlyMatchedKey(broad, message)
+            if broadKey is not None:
+                raise broad[broadKey](feedback)
+            if code == 400:
+                raise BadRequest(feedback)
+            raise ExchangeError(feedback)  # unknown message
 
     def nonce(self):
         return self.milliseconds()

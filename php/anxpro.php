@@ -144,6 +144,7 @@ class anxpro extends Exchange {
     }
 
     public function fetch_transactions ($code = null, $since = null, $limit = null, $params = array ()) {
+        // todo => migrate this to fetchLedger
         $this->load_markets();
         $request = array();
         if ($since !== null) {
@@ -206,8 +207,8 @@ class anxpro extends Exchange {
         //     }
         //
         $transactions = $this->safe_value($response, 'transactions', array());
-        $grouped = $this->group_by($transactions, 'transactionType');
-        $depositsAndWithdrawals = $this->array_concat($grouped['DEPOSIT'], $grouped['WITHDRAWAL']);
+        $grouped = $this->group_by($transactions, 'transactionType', array());
+        $depositsAndWithdrawals = $this->array_concat($this->safe_value($grouped, 'DEPOSIT', array()), $this->safe_value($grouped, 'WITHDRAWAL', array()));
         return $this->parseTransactions ($depositsAndWithdrawals, $currency, $since, $limit);
     }
 
@@ -301,7 +302,7 @@ class anxpro extends Exchange {
             $type = 'deposit';
         }
         $currencyId = $this->safe_string($transaction, 'ccy');
-        $code = $this->common_currency_code($currencyId);
+        $code = $this->safe_currency_code($currencyId);
         $transactionState = $this->safe_string($transaction, 'transactionState');
         $status = $this->parse_transaction_status ($transactionState);
         $feeCost = $this->safe_float($transaction, 'fee');
@@ -519,7 +520,7 @@ class anxpro extends Exchange {
         for ($i = 0; $i < count ($ids); $i++) {
             $id = $ids[$i];
             $currency = $currencies[$id];
-            $code = $this->common_currency_code($id);
+            $code = $this->safe_currency_code($id);
             $engineSettings = $this->safe_value($currency, 'engineSettings');
             $depositsEnabled = $this->safe_value($engineSettings, 'depositsEnabled');
             $withdrawalsEnabled = $this->safe_value($engineSettings, 'withdrawalsEnabled');
@@ -673,8 +674,8 @@ class anxpro extends Exchange {
             //
             $baseId = $this->safe_string($market, 'tradedCcy');
             $quoteId = $this->safe_string($market, 'settlementCcy');
-            $base = $this->common_currency_code($baseId);
-            $quote = $this->common_currency_code($quoteId);
+            $base = $this->safe_currency_code($baseId);
+            $quote = $this->safe_currency_code($quoteId);
             $symbol = $base . '/' . $quote;
             $baseCurrency = $this->safe_value($currencies, $baseId, array());
             $quoteCurrency = $this->safe_value($currencies, $quoteId, array());
@@ -719,19 +720,16 @@ class anxpro extends Exchange {
         $this->load_markets();
         $response = $this->privatePostMoneyInfo ($params);
         $balance = $this->safe_value($response, 'data', array());
-        $wallets = $balance['Wallets'];
-        $currencies = is_array($wallets) ? array_keys($wallets) : array();
+        $wallets = $this->safe_value($balance, 'Wallets', array());
+        $currencyIds = is_array($wallets) ? array_keys($wallets) : array();
         $result = array( 'info' => $balance );
-        for ($c = 0; $c < count ($currencies); $c++) {
-            $currencyId = $currencies[$c];
-            $code = $this->common_currency_code($currencyId);
+        for ($c = 0; $c < count ($currencyIds); $c++) {
+            $currencyId = $currencyIds[$c];
+            $code = $this->safe_currency_code($currencyId);
             $account = $this->account ();
-            if (is_array($wallets) && array_key_exists($currencyId, $wallets)) {
-                $wallet = $wallets[$currencyId];
-                $account['free'] = $this->safe_float($wallet['Available_Balance'], 'value');
-                $account['total'] = $this->safe_float($wallet['Balance'], 'value');
-                $account['used'] = $account['total'] - $account['free'];
-            }
+            $wallet = $this->safe_value($wallets, $currencyId);
+            $account['free'] = $this->safe_float($wallet['Available_Balance'], 'value');
+            $account['total'] = $this->safe_float($wallet['Balance'], 'value');
             $result[$code] = $account;
         }
         return $this->parse_balance($result);
@@ -853,10 +851,11 @@ class anxpro extends Exchange {
     }
 
     public function parse_order ($order, $market = null) {
-        if (is_array($order) && array_key_exists('orderId', $order))
+        if (is_array($order) && array_key_exists('orderId', $order)) {
             return $this->parse_order_v3 ($order, $market);
-        else
+        } else {
             return $this->parse_order_v2 ($order, $market);
+        }
     }
 
     public function parse_order_status ($status) {
@@ -923,8 +922,9 @@ class anxpro extends Exchange {
         for ($i = 0; $i < count ($order['trades']); $i++) {
             $trade = $order['trades'][$i];
             $tradeTimestamp = $this->safe_integer($trade, 'timestamp');
-            if (!$lastTradeTimestamp || $lastTradeTimestamp < $tradeTimestamp)
+            if (!$lastTradeTimestamp || $lastTradeTimestamp < $tradeTimestamp) {
                 $lastTradeTimestamp = $tradeTimestamp;
+            }
             $parsedTrade = array_merge ($this->parse_trade($trade), array( 'side' => $side, 'type' => $type ));
             $trades[] = $parsedTrade;
             $filled = $this->sum ($filled, $parsedTrade['amount']);
@@ -1112,8 +1112,8 @@ class anxpro extends Exchange {
             'currency' => $currency['id'],
         );
         $response = $this->privatePostMoneyCurrencyAddress (array_merge ($request, $params));
-        $result = $response['data'];
-        $address = $this->safe_string($result, 'addr');
+        $data = $this->safe_value($response, 'data', array());
+        $address = $this->safe_string($data, 'addr');
         $this->check_address($address);
         return array (
             'currency' => $code,
@@ -1131,8 +1131,9 @@ class anxpro extends Exchange {
         $query = $this->omit ($params, $this->extract_params($path));
         $url = $this->urls['api'][$api] . '/' . $request;
         if ($api === 'public' || $api === 'v3public') {
-            if ($query)
+            if ($query) {
                 $url .= '?' . $this->urlencode ($query);
+            }
         } else {
             $this->check_required_credentials();
             $nonce = $this->nonce ();

@@ -180,13 +180,7 @@ class dsx extends liqui {
             }
         }
         $currencyId = $this->safe_string($transaction, 'currency');
-        $code = null;
-        if (is_array($this->currencies_by_id) && array_key_exists($currencyId, $this->currencies_by_id)) {
-            $ccy = $this->currencies_by_id[$currencyId];
-            $code = $ccy['code'];
-        } else {
-            $code = $this->common_currency_code($currencyId);
-        }
+        $code = $this->safe_currency_code($currencyId, $currency);
         $status = $this->parse_transaction_status ($this->safe_string($transaction, 'status'));
         return array (
             'id' => $this->safe_string($transaction, 'id'),
@@ -208,7 +202,7 @@ class dsx extends liqui {
     }
 
     public function fetch_markets ($params = array ()) {
-        $response = $this->publicGetInfo ();
+        $response = $this->publicGetInfo ($params);
         $markets = $response['pairs'];
         $keys = is_array($markets) ? array_keys($markets) : array();
         $result = array();
@@ -217,8 +211,8 @@ class dsx extends liqui {
             $market = $markets[$id];
             $baseId = $this->safe_string($market, 'base_currency');
             $quoteId = $this->safe_string($market, 'quoted_currency');
-            $base = $this->common_currency_code($baseId);
-            $quote = $this->common_currency_code($quoteId);
+            $base = $this->safe_currency_code($baseId);
+            $quote = $this->safe_currency_code($quoteId);
             $symbol = $base . '/' . $quote;
             $precision = array (
                 'amount' => $this->safe_integer($market, 'decimal_places'),
@@ -289,19 +283,17 @@ class dsx extends liqui {
         //       }
         //     }
         //
-        $balances = $response['return'];
-        $result = array( 'info' => $balances );
-        $funds = $balances['funds'];
-        $ids = is_array($funds) ? array_keys($funds) : array();
-        for ($c = 0; $c < count ($ids); $c++) {
-            $id = $ids[$c];
-            $code = $this->common_currency_code($id);
-            $account = array (
-                'free' => $funds[$id]['available'],
-                'used' => 0.0,
-                'total' => $funds[$id]['total'],
-            );
-            $account['used'] = $account['total'] - $account['free'];
+        $balances = $this->safe_value($response, 'return');
+        $result = array( 'info' => $response );
+        $funds = $this->safe_value($balances, 'funds');
+        $currencyIds = is_array($funds) ? array_keys($funds) : array();
+        for ($i = 0; $i < count ($currencyIds); $i++) {
+            $currencyId = $currencyIds[$i];
+            $code = $this->safe_currency_code($currencyId);
+            $balance = $this->safe_value($funds, $currencyId, array());
+            $account = $this->account ();
+            $account['free'] = $this->safe_float($balance, 'available');
+            $account['total'] = $this->safe_float($balance, 'total');
             $result[$code] = $account;
         }
         return $this->parse_balance($result);
@@ -544,14 +536,7 @@ class dsx extends liqui {
         $feeCost = $this->safe_float($trade, 'commission');
         if ($feeCost !== null) {
             $feeCurrencyId = $this->safe_string($trade, 'commissionCurrency');
-            $feeCurrencyId = strtoupper($feeCurrencyId);
-            $feeCurrency = $this->safe_value($this->currencies_by_id, $feeCurrencyId);
-            $feeCurrencyCode = null;
-            if ($feeCurrency !== null) {
-                $feeCurrencyCode = $feeCurrency['code'];
-            } else {
-                $feeCurrencyCode = $this->common_currency_code($feeCurrencyId);
-            }
+            $feeCurrencyCode = $this->safe_currency_code($feeCurrencyId);
             $fee = array (
                 'cost' => $feeCost,
                 'currency' => $feeCurrencyCode,

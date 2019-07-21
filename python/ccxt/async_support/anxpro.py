@@ -153,6 +153,7 @@ class anxpro (Exchange):
         })
 
     async def fetch_transactions(self, code=None, since=None, limit=None, params={}):
+        # todo: migrate self to fetchLedger
         await self.load_markets()
         request = {}
         if since is not None:
@@ -212,8 +213,8 @@ class anxpro (Exchange):
         #     }
         #
         transactions = self.safe_value(response, 'transactions', [])
-        grouped = self.group_by(transactions, 'transactionType')
-        depositsAndWithdrawals = self.array_concat(grouped['DEPOSIT'], grouped['WITHDRAWAL'])
+        grouped = self.group_by(transactions, 'transactionType', [])
+        depositsAndWithdrawals = self.array_concat(self.safe_value(grouped, 'DEPOSIT', []), self.safe_value(grouped, 'WITHDRAWAL', []))
         return self.parseTransactions(depositsAndWithdrawals, currency, since, limit)
 
     def parse_transaction(self, transaction, currency=None):
@@ -300,7 +301,7 @@ class anxpro (Exchange):
                         address = addressText
             type = 'deposit'
         currencyId = self.safe_string(transaction, 'ccy')
-        code = self.common_currency_code(currencyId)
+        code = self.safe_currency_code(currencyId)
         transactionState = self.safe_string(transaction, 'transactionState')
         status = self.parse_transaction_status(transactionState)
         feeCost = self.safe_float(transaction, 'fee')
@@ -513,7 +514,7 @@ class anxpro (Exchange):
         for i in range(0, len(ids)):
             id = ids[i]
             currency = currencies[id]
-            code = self.common_currency_code(id)
+            code = self.safe_currency_code(id)
             engineSettings = self.safe_value(currency, 'engineSettings')
             depositsEnabled = self.safe_value(engineSettings, 'depositsEnabled')
             withdrawalsEnabled = self.safe_value(engineSettings, 'withdrawalsEnabled')
@@ -664,8 +665,8 @@ class anxpro (Exchange):
             #
             baseId = self.safe_string(market, 'tradedCcy')
             quoteId = self.safe_string(market, 'settlementCcy')
-            base = self.common_currency_code(baseId)
-            quote = self.common_currency_code(quoteId)
+            base = self.safe_currency_code(baseId)
+            quote = self.safe_currency_code(quoteId)
             symbol = base + '/' + quote
             baseCurrency = self.safe_value(currencies, baseId, {})
             quoteCurrency = self.safe_value(currencies, quoteId, {})
@@ -708,18 +709,16 @@ class anxpro (Exchange):
         await self.load_markets()
         response = await self.privatePostMoneyInfo(params)
         balance = self.safe_value(response, 'data', {})
-        wallets = balance['Wallets']
-        currencies = list(wallets.keys())
+        wallets = self.safe_value(balance, 'Wallets', {})
+        currencyIds = list(wallets.keys())
         result = {'info': balance}
-        for c in range(0, len(currencies)):
-            currencyId = currencies[c]
-            code = self.common_currency_code(currencyId)
+        for c in range(0, len(currencyIds)):
+            currencyId = currencyIds[c]
+            code = self.safe_currency_code(currencyId)
             account = self.account()
-            if currencyId in wallets:
-                wallet = wallets[currencyId]
-                account['free'] = self.safe_float(wallet['Available_Balance'], 'value')
-                account['total'] = self.safe_float(wallet['Balance'], 'value')
-                account['used'] = account['total'] - account['free']
+            wallet = self.safe_value(wallets, currencyId)
+            account['free'] = self.safe_float(wallet['Available_Balance'], 'value')
+            account['total'] = self.safe_float(wallet['Balance'], 'value')
             result[code] = account
         return self.parse_balance(result)
 
@@ -1076,8 +1075,8 @@ class anxpro (Exchange):
             'currency': currency['id'],
         }
         response = await self.privatePostMoneyCurrencyAddress(self.extend(request, params))
-        result = response['data']
-        address = self.safe_string(result, 'addr')
+        data = self.safe_value(response, 'data', {})
+        address = self.safe_string(data, 'addr')
         self.check_address(address)
         return {
             'currency': code,
